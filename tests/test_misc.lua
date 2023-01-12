@@ -12,12 +12,17 @@ local project_root = vim.fn.fnamemodify(vim.fn.getcwd(), ':p')
 local load_module = function(config) child.mini_load('misc', config) end
 local unload_module = function() child.mini_unload('misc') end
 local reload_module = function(config) unload_module(); load_module(config) end
+local set_cursor = function(...) return child.set_cursor(...) end
+local get_cursor = function(...) return child.get_cursor(...) end
 local set_lines = function(...) return child.set_lines(...) end
 local get_lines = function(...) return child.get_lines(...) end
+local type_keys = function(...) return child.type_keys(...) end
 local make_path = function(...) return table.concat({...}, path_sep):gsub(path_sep .. path_sep, path_sep) end
 local make_abspath = function(...) return make_path(project_root, ...) end
 local getcwd = function() return child.fn.fnamemodify(child.fn.getcwd(), ':p') end
 --stylua: ignore end
+
+local get_fold_range = function(line_num) return { child.fn.foldclosed(line_num), child.fn.foldclosedend(line_num) } end
 
 -- Output test set ============================================================
 T = new_set({
@@ -127,6 +132,642 @@ T['get_gutter_width()']['respects `win_id` argument'] = function()
 
   child.api.nvim_win_set_option(windows[1], 'signcolumn', 'yes:1')
   eq(child.lua_get('MiniMisc.get_gutter_width(...)', { windows[2] }), 0)
+end
+
+T['move_selection()'] = new_set()
+
+local move = function(direction) child.lua('MiniMisc.move_selection(...)', { direction }) end
+
+-- These mappings also serve as tests for documented suggested mappings
+local map_move = function(direction)
+  local key = ({ left = 'H', down = 'J', up = 'K', right = 'L' })[direction]
+  local rhs = string.format([[<Cmd>lua MiniMisc.move_selection('%s')<CR>]], direction)
+  child.api.nvim_set_keymap('x', key, rhs, { noremap = true })
+end
+
+local validate_move_state = function(lines, selection)
+  eq(get_lines(), lines)
+  eq({ { child.fn.line('v'), child.fn.col('v') }, { child.fn.line('.'), child.fn.col('.') } }, selection)
+end
+
+local validate_move_state1d =
+  function(line, range) validate_move_state({ line }, { { 1, range[1] }, { 1, range[2] } }) end
+
+T['move_selection()']['works charwise horizontally'] = function()
+  -- Test for this many moves because there can be special cases when movement
+  -- involves second or second to last character
+  set_lines({ 'XXabcd' })
+  set_cursor(1, 0)
+  type_keys('vl')
+  validate_move_state1d('XXabcd', { 1, 2 })
+
+  move('right')
+  validate_move_state1d('aXXbcd', { 2, 3 })
+  move('right')
+  validate_move_state1d('abXXcd', { 3, 4 })
+  move('right')
+  validate_move_state1d('abcXXd', { 4, 5 })
+  move('right')
+  validate_move_state1d('abcdXX', { 5, 6 })
+  -- Should allow to try to move past line end without error
+  move('right')
+  validate_move_state1d('abcdXX', { 5, 6 })
+
+  move('left')
+  validate_move_state1d('abcXXd', { 4, 5 })
+  move('left')
+  validate_move_state1d('abXXcd', { 3, 4 })
+  move('left')
+  validate_move_state1d('aXXbcd', { 2, 3 })
+  move('left')
+  validate_move_state1d('XXabcd', { 1, 2 })
+  -- Should allow to try to move past line start without error
+  move('left')
+  validate_move_state1d('XXabcd', { 1, 2 })
+end
+
+T['move_selection()']['respects `v:count` charwise horizontally'] = function()
+  map_move('right')
+  map_move('left')
+
+  set_lines({ 'XXabcd' })
+  set_cursor(1, 0)
+  type_keys('vl')
+  validate_move_state1d('XXabcd', { 1, 2 })
+
+  type_keys('1L')
+  validate_move_state1d('aXXbcd', { 2, 3 })
+  type_keys('2L')
+  validate_move_state1d('abcXXd', { 4, 5 })
+  -- Can allow overshoot without error
+  type_keys('2L')
+  validate_move_state1d('abcdXX', { 5, 6 })
+
+  type_keys('1H')
+  validate_move_state1d('abcXXd', { 4, 5 })
+  type_keys('2H')
+  validate_move_state1d('aXXbcd', { 2, 3 })
+  -- Can allow overshoot without error
+  type_keys('2H')
+  validate_move_state1d('XXabcd', { 1, 2 })
+end
+
+T['move_selection()']['works charwise vertically'] = function()
+  set_lines({ '1XXx', '2a', '3b', '4c', '5d' })
+  set_cursor(1, 1)
+  type_keys('vl')
+  validate_move_state({ '1XXx', '2a', '3b', '4c', '5d' }, { { 1, 2 }, { 1, 3 } })
+
+  move('down')
+  validate_move_state({ '1x', '2XXa', '3b', '4c', '5d' }, { { 2, 2 }, { 2, 3 } })
+  move('down')
+  validate_move_state({ '1x', '2a', '3XXb', '4c', '5d' }, { { 3, 2 }, { 3, 3 } })
+  move('down')
+  validate_move_state({ '1x', '2a', '3b', '4XXc', '5d' }, { { 4, 2 }, { 4, 3 } })
+  move('down')
+  validate_move_state({ '1x', '2a', '3b', '4c', '5XXd' }, { { 5, 2 }, { 5, 3 } })
+  -- Should allow to try to move past last line without error
+  move('down')
+  validate_move_state({ '1x', '2a', '3b', '4c', '5XXd' }, { { 5, 2 }, { 5, 3 } })
+
+  move('up')
+  validate_move_state({ '1x', '2a', '3b', '4XXc', '5d' }, { { 4, 2 }, { 4, 3 } })
+  move('up')
+  validate_move_state({ '1x', '2a', '3XXb', '4c', '5d' }, { { 3, 2 }, { 3, 3 } })
+  move('up')
+  validate_move_state({ '1x', '2XXa', '3b', '4c', '5d' }, { { 2, 2 }, { 2, 3 } })
+  move('up')
+  validate_move_state({ '1XXx', '2a', '3b', '4c', '5d' }, { { 1, 2 }, { 1, 3 } })
+  -- Should allow to try to move past first line without error
+  move('up')
+  validate_move_state({ '1XXx', '2a', '3b', '4c', '5d' }, { { 1, 2 }, { 1, 3 } })
+end
+
+T['move_selection()']['respects `v:count` charwise vertically'] = function()
+  map_move('down')
+  map_move('up')
+
+  set_lines({ '1XXx', '2a', '3b', '4c', '5d' })
+  set_cursor(1, 1)
+  type_keys('vl')
+  validate_move_state({ '1XXx', '2a', '3b', '4c', '5d' }, { { 1, 2 }, { 1, 3 } })
+
+  type_keys('1J')
+  validate_move_state({ '1x', '2XXa', '3b', '4c', '5d' }, { { 2, 2 }, { 2, 3 } })
+  type_keys('2J')
+  validate_move_state({ '1x', '2a', '3b', '4XXc', '5d' }, { { 4, 2 }, { 4, 3 } })
+  -- Should allow overshoot without error
+  type_keys('2J')
+  validate_move_state({ '1x', '2a', '3b', '4c', '5XXd' }, { { 5, 2 }, { 5, 3 } })
+
+  type_keys('1K')
+  validate_move_state({ '1x', '2a', '3b', '4XXc', '5d' }, { { 4, 2 }, { 4, 3 } })
+  type_keys('2K')
+  validate_move_state({ '1x', '2XXa', '3b', '4c', '5d' }, { { 2, 2 }, { 2, 3 } })
+  -- Should allow overshoot without error
+  type_keys('2K')
+  validate_move_state({ '1XXx', '2a', '3b', '4c', '5d' }, { { 1, 2 }, { 1, 3 } })
+end
+
+T['move_selection()']['works with folds charwise'] = function()
+  local setup_folds = function()
+    child.ensure_normal_mode()
+    set_lines({ '1XX', '2aa', '3bb', '4cc', '5YY' })
+
+    -- Create fold
+    type_keys('zE')
+    set_cursor(2, 0)
+    type_keys('zf', '2j')
+  end
+
+  -- Down
+  setup_folds()
+  set_cursor(1, 1)
+  type_keys('vl')
+  validate_move_state({ '1XX', '2aa', '3bb', '4cc', '5YY' }, { { 1, 2 }, { 1, 3 } })
+  eq(get_fold_range(2), { 2, 4 })
+
+  -- - When moving "into fold", it should open it
+  move('down')
+  validate_move_state({ '1', '2XXaa', '3bb', '4cc', '5YY' }, { { 2, 2 }, { 2, 3 } })
+  eq(get_fold_range(2), { -1, -1 })
+
+  -- Up
+  setup_folds()
+  set_cursor(5, 1)
+  type_keys('vl')
+  validate_move_state({ '1XX', '2aa', '3bb', '4cc', '5YY' }, { { 5, 2 }, { 5, 3 } })
+  eq(get_fold_range(2), { 2, 4 })
+
+  -- - When moving "into fold", it should open it. But it happens only after
+  --   entering fold, so cursor is at the start of fold. Would be nice to
+  --   change so that fold is opened before movement, but it requires some
+  --   extra non-trivial steps.
+  move('up')
+  validate_move_state({ '1XX', '2YYaa', '3bb', '4cc', '5' }, { { 2, 2 }, { 2, 3 } })
+  eq(get_fold_range(2), { -1, -1 })
+end
+
+T['move_selection()']['works charwise vertically on line start/end'] = function()
+  -- Line start
+  set_lines({ 'XXx', 'a', 'b' })
+  set_cursor(1, 0)
+  type_keys('vl')
+  validate_move_state({ 'XXx', 'a', 'b' }, { { 1, 1 }, { 1, 2 } })
+
+  move('down')
+  validate_move_state({ 'x', 'XXa', 'b' }, { { 2, 1 }, { 2, 2 } })
+  move('down')
+  validate_move_state({ 'x', 'a', 'XXb' }, { { 3, 1 }, { 3, 2 } })
+  move('up')
+  validate_move_state({ 'x', 'XXa', 'b' }, { { 2, 1 }, { 2, 2 } })
+  move('up')
+  validate_move_state({ 'XXx', 'a', 'b' }, { { 1, 1 }, { 1, 2 } })
+
+  child.ensure_normal_mode()
+
+  -- Line end
+  set_lines({ 'xXX', 'a', 'b' })
+  set_cursor(1, 1)
+  type_keys('vl')
+  validate_move_state({ 'xXX', 'a', 'b' }, { { 1, 2 }, { 1, 3 } })
+
+  move('down')
+  validate_move_state({ 'x', 'aXX', 'b' }, { { 2, 2 }, { 2, 3 } })
+  move('down')
+  validate_move_state({ 'x', 'a', 'bXX' }, { { 3, 2 }, { 3, 3 } })
+  move('up')
+  validate_move_state({ 'x', 'aXX', 'b' }, { { 2, 2 }, { 2, 3 } })
+  move('up')
+  validate_move_state({ 'xXX', 'a', 'b' }, { { 1, 2 }, { 1, 3 } })
+
+  child.ensure_normal_mode()
+
+  -- Whole line (but in charwise mode)
+  set_lines({ 'XX', '', '' })
+  set_cursor(1, 0)
+  type_keys('vl')
+  validate_move_state({ 'XX', '', '' }, { { 1, 1 }, { 1, 2 } })
+
+  move('down')
+  validate_move_state({ '', 'XX', '' }, { { 2, 1 }, { 2, 2 } })
+  move('down')
+  validate_move_state({ '', '', 'XX' }, { { 3, 1 }, { 3, 2 } })
+  move('up')
+  validate_move_state({ '', 'XX', '' }, { { 2, 1 }, { 2, 2 } })
+  move('up')
+  validate_move_state({ 'XX', '', '' }, { { 1, 1 }, { 1, 2 } })
+end
+
+T['move_selection()']['works blockwise horizontally'] = function()
+  set_lines({ 'XXabcd', 'XXabcd' })
+  set_cursor(1, 0)
+  type_keys('<C-v>', 'lj')
+  validate_move_state({ 'XXabcd', 'XXabcd' }, { { 1, 1 }, { 2, 2 } })
+
+  move('right')
+  validate_move_state({ 'aXXbcd', 'aXXbcd' }, { { 1, 2 }, { 2, 3 } })
+  move('right')
+  validate_move_state({ 'abXXcd', 'abXXcd' }, { { 1, 3 }, { 2, 4 } })
+  move('right')
+  validate_move_state({ 'abcXXd', 'abcXXd' }, { { 1, 4 }, { 2, 5 } })
+  move('right')
+  validate_move_state({ 'abcdXX', 'abcdXX' }, { { 1, 5 }, { 2, 6 } })
+  -- Should allow to try to move past line end without error
+  move('right')
+  validate_move_state({ 'abcdXX', 'abcdXX' }, { { 1, 5 }, { 2, 6 } })
+
+  move('left')
+  validate_move_state({ 'abcXXd', 'abcXXd' }, { { 1, 4 }, { 2, 5 } })
+  move('left')
+  validate_move_state({ 'abXXcd', 'abXXcd' }, { { 1, 3 }, { 2, 4 } })
+  move('left')
+  validate_move_state({ 'aXXbcd', 'aXXbcd' }, { { 1, 2 }, { 2, 3 } })
+  move('left')
+  validate_move_state({ 'XXabcd', 'XXabcd' }, { { 1, 1 }, { 2, 2 } })
+  -- Should allow to try to move past line start without error
+  move('left')
+  validate_move_state({ 'XXabcd', 'XXabcd' }, { { 1, 1 }, { 2, 2 } })
+end
+
+T['move_selection()']['respects `v:count` blockwise horizontally'] = function()
+  map_move('right')
+  map_move('left')
+
+  set_lines({ 'XXabcd', 'XXabcd' })
+  set_cursor(1, 0)
+  type_keys('<C-v>', 'lj')
+  validate_move_state({ 'XXabcd', 'XXabcd' }, { { 1, 1 }, { 2, 2 } })
+
+  type_keys('1L')
+  validate_move_state({ 'aXXbcd', 'aXXbcd' }, { { 1, 2 }, { 2, 3 } })
+  type_keys('2L')
+  validate_move_state({ 'abcXXd', 'abcXXd' }, { { 1, 4 }, { 2, 5 } })
+  -- Should allow overshoot without error
+  type_keys('2L')
+  validate_move_state({ 'abcdXX', 'abcdXX' }, { { 1, 5 }, { 2, 6 } })
+
+  type_keys('1H')
+  validate_move_state({ 'abcXXd', 'abcXXd' }, { { 1, 4 }, { 2, 5 } })
+  type_keys('2H')
+  validate_move_state({ 'aXXbcd', 'aXXbcd' }, { { 1, 2 }, { 2, 3 } })
+  -- Should allow overshoot without error
+  type_keys('2H')
+  validate_move_state({ 'XXabcd', 'XXabcd' }, { { 1, 1 }, { 2, 2 } })
+end
+
+T['move_selection()']['works blockwise vertically'] = function()
+  set_lines({ '1XXa', '2YYb', '3c', '4d', '5e' })
+  set_cursor(1, 1)
+  type_keys('<C-v>', 'lj')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+
+  move('down')
+  validate_move_state({ '1a', '2XXb', '3YYc', '4d', '5e' }, { { 2, 2 }, { 3, 3 } })
+  move('down')
+  validate_move_state({ '1a', '2b', '3XXc', '4YYd', '5e' }, { { 3, 2 }, { 4, 3 } })
+  move('down')
+  validate_move_state({ '1a', '2b', '3c', '4XXd', '5YYe' }, { { 4, 2 }, { 5, 3 } })
+  -- Should allow to try to move past last line without error and not
+  -- going outside of buffer lines
+  move('down')
+  validate_move_state({ '1a', '2b', '3c', '4XXd', '5YYe' }, { { 4, 2 }, { 5, 3 } })
+
+  move('up')
+  validate_move_state({ '1a', '2b', '3XXc', '4YYd', '5e' }, { { 3, 2 }, { 4, 3 } })
+  move('up')
+  validate_move_state({ '1a', '2XXb', '3YYc', '4d', '5e' }, { { 2, 2 }, { 3, 3 } })
+  move('up')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+  -- Should allow to try to move past first line without error
+  move('up')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+end
+
+T['move_selection()']['respects `v:count` blockwise vertically'] = function()
+  map_move('down')
+  map_move('up')
+
+  set_lines({ '1XXa', '2YYb', '3c', '4d', '5e' })
+  set_cursor(1, 1)
+  type_keys('<C-v>', 'lj')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+
+  type_keys('1J')
+  validate_move_state({ '1a', '2XXb', '3YYc', '4d', '5e' }, { { 2, 2 }, { 3, 3 } })
+  type_keys('2J')
+  validate_move_state({ '1a', '2b', '3c', '4XXd', '5YYe' }, { { 4, 2 }, { 5, 3 } })
+  -- Should allow overshoot without error
+  type_keys('2J')
+  validate_move_state({ '1a', '2b', '3c', '4XXd', '5YYe' }, { { 4, 2 }, { 5, 3 } })
+
+  type_keys('1K')
+  validate_move_state({ '1a', '2b', '3XXc', '4YYd', '5e' }, { { 3, 2 }, { 4, 3 } })
+  type_keys('2K')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+  -- Should allow overshoot without error
+  type_keys('2K')
+  validate_move_state({ '1XXa', '2YYb', '3c', '4d', '5e' }, { { 1, 2 }, { 2, 3 } })
+end
+
+T['move_selection()']['works with folds blockwise'] = function()
+  local setup_folds = function()
+    child.ensure_normal_mode()
+    set_lines({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' })
+
+    -- Create fold
+    type_keys('zE')
+    set_cursor(3, 0)
+    type_keys('zf', '2j')
+  end
+
+  -- Down
+  setup_folds()
+  set_cursor(1, 1)
+  type_keys('<C-v>', 'jl')
+  validate_move_state({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' }, { { 1, 2 }, { 2, 3 } })
+  eq(get_fold_range(3), { 3, 5 })
+
+  -- - When moving "into fold", it should open it, but this is determined by
+  --   top-left corner of selection. So in this case whole fold is selected.
+  move('down')
+  validate_move_state({ '1', '2XX', '3YYaa', '4bb', '5cc', '6XX', '7YY' }, { { 2, 2 }, { 5, 4 } })
+  eq(get_fold_range(3), { 3, 5 })
+
+  -- Up
+  setup_folds()
+  set_cursor(6, 1)
+  type_keys('<C-v>', 'jl')
+  validate_move_state({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' }, { { 6, 2 }, { 7, 3 } })
+  eq(get_fold_range(3), { 3, 5 })
+
+  -- - When moving "into fold", it should open it. But it happens only after
+  --   entering fold, so cursor is at the start of fold. Would be nice to
+  --   change so that fold is opened before movement, but it requires some
+  --   extra non-trivial steps.
+  move('up')
+  validate_move_state({ '1XX', '2YY', '3XXaa', '4YYbb', '5cc', '6', '7' }, { { 3, 2 }, { 4, 3 } })
+  eq(get_fold_range(2), { -1, -1 })
+end
+
+T['move_selection()']['works linewise horizontally'] = function()
+  -- Should be the same as indent (`>`) and dedent (`<`)
+  set_lines({ 'aa', '  bb' })
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ 'aa', '  bb' }, { { 1, 1 }, { 2, 1 } })
+
+  move('right')
+  validate_move_state({ '\taa', '\t  bb' }, { { 1, 1 }, { 2, 1 } })
+  move('right')
+  validate_move_state({ '\t\taa', '\t\t  bb' }, { { 1, 1 }, { 2, 1 } })
+
+  move('left')
+  validate_move_state({ '\taa', '\t  bb' }, { { 1, 1 }, { 2, 1 } })
+  move('left')
+  validate_move_state({ 'aa', '  bb' }, { { 1, 1 }, { 2, 1 } })
+  move('left')
+  validate_move_state({ 'aa', 'bb' }, { { 1, 1 }, { 2, 1 } })
+  -- Should allow to try impossible dedent without error
+  move('left')
+  validate_move_state({ 'aa', 'bb' }, { { 1, 1 }, { 2, 1 } })
+end
+
+T['move_selection()']['respects `v:count` linewise horizontally'] = function()
+  map_move('right')
+  map_move('left')
+
+  set_lines({ 'aa', '  bb' })
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ 'aa', '  bb' }, { { 1, 1 }, { 2, 1 } })
+
+  type_keys('1L')
+  validate_move_state({ '\taa', '\t  bb' }, { { 1, 1 }, { 2, 1 } })
+  type_keys('2L')
+  validate_move_state({ '\t\t\taa', '\t\t\t  bb' }, { { 1, 1 }, { 2, 1 } })
+
+  type_keys('1H')
+  validate_move_state({ '\t\taa', '\t\t  bb' }, { { 1, 1 }, { 2, 1 } })
+  type_keys('2H')
+  validate_move_state({ 'aa', '  bb' }, { { 1, 1 }, { 2, 1 } })
+  -- Should allow overshoot without error
+  type_keys('2H')
+  validate_move_state({ 'aa', 'bb' }, { { 1, 1 }, { 2, 1 } })
+end
+
+T['move_selection()']['works linewise vertically'] = function()
+  set_lines({ 'XX', 'YY', 'aa', 'bb', 'cc' })
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+
+  move('down')
+  validate_move_state({ 'aa', 'XX', 'YY', 'bb', 'cc' }, { { 2, 1 }, { 3, 1 } })
+  move('down')
+  validate_move_state({ 'aa', 'bb', 'XX', 'YY', 'cc' }, { { 3, 1 }, { 4, 1 } })
+  move('down')
+  validate_move_state({ 'aa', 'bb', 'cc', 'XX', 'YY' }, { { 4, 1 }, { 5, 1 } })
+  -- Should allow to try to move past last line without error
+  move('down')
+  validate_move_state({ 'aa', 'bb', 'cc', 'XX', 'YY' }, { { 4, 1 }, { 5, 1 } })
+
+  move('up')
+  validate_move_state({ 'aa', 'bb', 'XX', 'YY', 'cc' }, { { 3, 1 }, { 4, 1 } })
+  move('up')
+  validate_move_state({ 'aa', 'XX', 'YY', 'bb', 'cc' }, { { 2, 1 }, { 3, 1 } })
+  move('up')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+  -- Should allow to try to move past first line without error
+  move('up')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+end
+
+T['move_selection()']['respects `v:count` linewise vertically'] = function()
+  map_move('down')
+  map_move('up')
+
+  set_lines({ 'XX', 'YY', 'aa', 'bb', 'cc' })
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+
+  type_keys('1J')
+  validate_move_state({ 'aa', 'XX', 'YY', 'bb', 'cc' }, { { 2, 1 }, { 3, 1 } })
+  type_keys('2J')
+  validate_move_state({ 'aa', 'bb', 'cc', 'XX', 'YY' }, { { 4, 1 }, { 5, 1 } })
+  -- Should allow overshoot without error
+  type_keys('2J')
+  validate_move_state({ 'aa', 'bb', 'cc', 'XX', 'YY' }, { { 4, 1 }, { 5, 1 } })
+
+  type_keys('1K')
+  validate_move_state({ 'aa', 'bb', 'XX', 'YY', 'cc' }, { { 3, 1 }, { 4, 1 } })
+  type_keys('2K')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+  -- Should allow overshoot without error
+  type_keys('2K')
+  validate_move_state({ 'XX', 'YY', 'aa', 'bb', 'cc' }, { { 1, 1 }, { 2, 1 } })
+end
+
+T['move_selection()']['works with folds linewise'] = function()
+  local setup_folds = function()
+    child.ensure_normal_mode()
+    set_lines({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' })
+
+    -- Create fold
+    type_keys('zE')
+    set_cursor(3, 0)
+    type_keys('zf', '2j')
+  end
+
+  -- Down
+  setup_folds()
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' }, { { 1, 1 }, { 2, 1 } })
+  eq(get_fold_range(3), { 3, 5 })
+
+  -- - Folds should be moved altogether
+  move('down')
+  validate_move_state({ '3aa', '4bb', '5cc', '1XX', '2YY', '6XX', '7YY' }, { { 4, 1 }, { 5, 1 } })
+  eq(get_fold_range(3), { 1, 3 })
+
+  -- Up
+  setup_folds()
+  set_cursor(6, 0)
+  type_keys('Vj')
+  validate_move_state({ '1XX', '2YY', '3aa', '4bb', '5cc', '6XX', '7YY' }, { { 6, 1 }, { 7, 1 } })
+  eq(get_fold_range(3), { 3, 5 })
+
+  -- - Folds should be moved altogether
+  move('up')
+  validate_move_state({ '1XX', '2YY', '6XX', '7YY', '3aa', '4bb', '5cc' }, { { 3, 1 }, { 4, 1 } })
+  eq(get_fold_range(5), { 5, 7 })
+end
+
+--stylua: ignore
+T['move_selection()']['reindents linewise vertically'] = function()
+  set_lines({ 'XX', 'YY', 'aa', '\tbb', '\t\tcc', '\tdd', 'ee' })
+  set_cursor(1, 0)
+  type_keys('Vj')
+  validate_move_state({ 'XX', 'YY',   'aa',     '\tbb',   '\t\tcc', '\tdd', 'ee' }, { { 1, 1 }, { 2, 1 } })
+
+  move('down')
+  validate_move_state({ 'aa', 'XX',   'YY',     '\tbb',   '\t\tcc', '\tdd', 'ee' }, { { 2, 1 }, { 3, 1 } })
+  move('down')
+  validate_move_state({ 'aa', '\tbb', '\tXX',   '\tYY',   '\t\tcc', '\tdd', 'ee' }, { { 3, 1 }, { 4, 1 } })
+  move('down')
+  validate_move_state({ 'aa', '\tbb', '\t\tcc', '\t\tXX', '\t\tYY', '\tdd', 'ee' }, { { 4, 1 }, { 5, 1 } })
+  move('down')
+  validate_move_state({ 'aa', '\tbb', '\t\tcc', '\tdd',   '\tXX',   '\tYY', 'ee' }, { { 5, 1 }, { 6, 1 } })
+  move('down')
+  validate_move_state({ 'aa', '\tbb', '\t\tcc', '\tdd',   'ee',     'XX',   'YY' }, { { 6, 1 }, { 7, 1 } })
+end
+
+T['move_selection()']['moves cursor respecting initial `curswant`'] = function()
+  set_lines({ 'aaX', 'aa', 'a', '', 'a', 'aa', 'aa' })
+  set_cursor(1, 2)
+  type_keys('v')
+  validate_move_state({ 'aaX', 'aa', 'a', '', 'a', 'aa', 'aa' }, { { 1, 3 }, { 1, 3 } })
+
+  move('down')
+  validate_move_state({ 'aa', 'aaX', 'a', '', 'a', 'aa', 'aa' }, { { 2, 3 }, { 2, 3 } })
+  move('down')
+  validate_move_state({ 'aa', 'aa', 'aX', '', 'a', 'aa', 'aa' }, { { 3, 2 }, { 3, 2 } })
+  move('down')
+  validate_move_state({ 'aa', 'aa', 'a', 'X', 'a', 'aa', 'aa' }, { { 4, 1 }, { 4, 1 } })
+  move('down')
+  validate_move_state({ 'aa', 'aa', 'a', '', 'aX', 'aa', 'aa' }, { { 5, 2 }, { 5, 2 } })
+  move('down')
+  validate_move_state({ 'aa', 'aa', 'a', '', 'a', 'aaX', 'aa' }, { { 6, 3 }, { 6, 3 } })
+  move('down')
+  validate_move_state({ 'aa', 'aa', 'a', '', 'a', 'aa', 'aaX' }, { { 7, 3 }, { 7, 3 } })
+
+  move('up')
+  validate_move_state({ 'aa', 'aa', 'a', '', 'a', 'aaX', 'aa' }, { { 6, 3 }, { 6, 3 } })
+  move('up')
+  validate_move_state({ 'aa', 'aa', 'a', '', 'aX', 'aa', 'aa' }, { { 5, 2 }, { 5, 2 } })
+  move('up')
+  validate_move_state({ 'aa', 'aa', 'a', 'X', 'a', 'aa', 'aa' }, { { 4, 1 }, { 4, 1 } })
+  move('up')
+  validate_move_state({ 'aa', 'aa', 'aX', '', 'a', 'aa', 'aa' }, { { 3, 2 }, { 3, 2 } })
+  move('up')
+  validate_move_state({ 'aa', 'aaX', 'a', '', 'a', 'aa', 'aa' }, { { 2, 3 }, { 2, 3 } })
+  move('up')
+  validate_move_state({ 'aaX', 'aa', 'a', '', 'a', 'aa', 'aa' }, { { 1, 3 }, { 1, 3 } })
+
+  -- Single horizontal move should reset `curswant`
+  move('down')
+  validate_move_state({ 'aa', 'aaX', 'a', '', 'a', 'aa', 'aa' }, { { 2, 3 }, { 2, 3 } })
+  move('left')
+  validate_move_state({ 'aa', 'aXa', 'a', '', 'a', 'aa', 'aa' }, { { 2, 2 }, { 2, 2 } })
+  move('up')
+  validate_move_state({ 'aXa', 'aa', 'a', '', 'a', 'aa', 'aa' }, { { 1, 2 }, { 1, 2 } })
+end
+
+T['move_selection()']['has no side effects'] = function()
+  set_lines({ 'abXcd' })
+  set_cursor(1, 0)
+
+  -- Shouldn't modify used `z` register
+  type_keys('"zyl')
+  eq(child.fn.getreg('z'), 'a')
+
+  -- Shouldn't modify 'virtualedit'
+  child.o.virtualedit = 'block,insert'
+
+  set_cursor(1, 2)
+  type_keys('v')
+  move('right')
+  validate_move_state1d('abcXd', { 4, 4 })
+
+  -- Check
+  eq(child.fn.getreg('z'), 'a')
+  eq(child.o.virtualedit, 'block,insert')
+end
+
+T['move_selection()']['works with `virtualedit=all`'] = function()
+  MiniTest.skip('Needs investigation')
+  -- child.o.virtualedit = 'all'
+  --
+  -- set_lines({ 'abX', '' })
+  -- set_cursor(1, 2)
+  -- type_keys('v')
+  --
+  -- move('right')
+  -- validate_move_state({ 'ab X', '' }, { { 1, 4 }, { 1, 4 } })
+  -- move('down')
+  -- validate_move_state({ 'ab ', '   X' }, { { 2, 4 }, { 2, 4 } })
+end
+
+T['move_selection()']['undos all movements at once'] = function()
+  MiniTest.skip('Needs investigation')
+  -- set_lines({ 'aXbc', 'defg' })
+  -- set_cursor(1, 1)
+  -- type_keys('v')
+  -- validate_move_state({ 'aXbc', 'defg' }, { { 1, 2 }, { 1, 2 } })
+  --
+  -- move('down')
+  -- move('right')
+  -- move('right')
+  -- move('up')
+  -- move('left')
+  -- validate_move_state({ 'abXc', 'defg' }, { { 1, 3 }, { 1, 3 } })
+end
+
+T['move_selection()']['does not create unnecessary jumps'] = function()
+  set_lines({ '1Xa', '2b', '3c', '4d' })
+  set_cursor(1, 1)
+  type_keys('m`')
+  type_keys('v')
+
+  move('down')
+  move('down')
+  move('down')
+  validate_move_state({ '1a', '2b', '3c', '4Xd' }, { { 4, 2 }, { 4, 2 } })
+
+  -- In jump list there should be only single entry
+  eq(#child.fn.getjumplist()[1], 1)
 end
 
 local validate_put = {

@@ -78,6 +78,157 @@ MiniMisc.get_gutter_width = function(win_id)
   return vim.fn.getwininfo(win_id)[1].textoff
 end
 
+--- Move visually selected region in any direction within present lines
+---
+--- Suggested setup: >
+---   vim.keymap.set('x', 'H', [[<Cmd>lua MiniMisc.move_selection('left')<CR>]])
+---   vim.keymap.set('x', 'J', [[<Cmd>lua MiniMisc.move_selection('down')<CR>]])
+---   vim.keymap.set('x', 'K', [[<Cmd>lua MiniMisc.move_selection('up')<CR>]])
+---   vim.keymap.set('x', 'L', [[<Cmd>lua MiniMisc.move_selection('right')<CR>]])
+---
+--- Features:
+--- - Works in all Visual submodes (charwise |v|, linewise |V|, and blockwise
+---   |CTRL-V|) in all four directions (left, down, up, right). Horizontal
+---   linewise movement is equivalent to indent with |>| and dedent with |<|.
+--- - Respects `v:count`. Something like `4L` will move selection equivalently
+---   to 4 times pressing `L`.
+--- - All consecutive moves (regardless of direction) can be undone by a single |u|.
+--- - Respects `curswant` (see |getcurpos()|). It will move selection as how
+---   cursor is moving (not strictly vertically if target column is not present
+---   in target line).
+---
+---@param direction string One of "left", "down", "up", "right".
+MiniMisc.move_selection = function(direction)
+  -- This could have been a one-line expression mappings, but there are issues:
+  -- - Initial yanking modifies some register. Not critical, but also not good.
+  -- - Doesn't work at movement edges (first line for `K`, etc.). See
+  --   https://github.com/vim/vim/issues/11786
+  -- - Results into each movement being a separate undo block, which is
+  --   inconvenient with several back-to-back movements.
+  local cur_mode = vim.fn.mode()
+
+  -- Act only inside visual mode
+  if not (cur_mode == 'v' or cur_mode == 'V' or cur_mode == '\22') then return end
+
+  -- Define common predicates
+  local dir_type = (direction == 'up' or direction == 'down') and 'vert' or 'hori'
+  local is_linewise = cur_mode == 'V'
+
+  -- Cache useful data because it will be reset when executing commands
+  local count1 = vim.v.count1
+
+  -- Determine of previous action was this type of move
+  local is_moving = vim.deep_equal(H.move_state, H.get_move_state())
+  if not is_moving then H.move_state.curswant = nil end
+
+  -- Allow undo of consecutive moves at once (direction doesn't matter)
+  local normal_command = (is_moving and 'undojoin |' or '') .. ' keepjumps normal! '
+  local cmd = function(x) vim.cmd(normal_command .. x) end
+
+  if is_linewise and dir_type == 'hori' then
+    -- Use indentation as horizontal movement for linewise selection
+    cmd(count1 .. H.indent_keys[direction] .. 'gv')
+  else
+    -- Move cursor with `hjkl` `count1` times dealing with special cases.
+
+    -- Temporarily ensure possibility to put cursor just after line end.
+    -- This allows a more intuitive cursor positioning from and to end of line.
+    -- NOTE: somehow, this should be done before initial cut to take effect.
+    local cache_virtualedit = vim.o.virtualedit
+    if not cache_virtualedit:find('all') then vim.o.virtualedit = 'onemore' end
+
+    -- Cut selection while saving caching register
+    local cache_z_reg = vim.fn.getreg('z')
+    cmd('"zx')
+
+    -- Detect edge selection: last line(s) for vertical and last character(s)
+    -- for horizontal. At this point (after cutting selection) cursor is on the
+    -- edge which can happen in two cases:
+    --   - Move second to last selection towards edge (like in 'abc' move 'b'
+    --     to right or second to last line down).
+    --   - Move edge selection away from edge (like in 'abc' move 'c' to left
+    --     or last line up).
+    -- Use condition that removed selection was further than current cursor
+    -- to distinguish between two cases.
+    local is_edge_selection_hori = dir_type == 'hori' and vim.fn.col('.') < vim.fn.col("'<")
+    local is_edge_selection_vert = dir_type == 'vert' and vim.fn.line('.') < vim.fn.line("'<")
+    local is_edge_selection = is_edge_selection_hori or is_edge_selection_vert
+
+    -- Use `p` as paste key instead of `P` in cases which might require moving
+    -- selection to place which is unreachable with `P`: right to be line end
+    -- and down to be last line. NOTE: temporary `virtualedit=onemore` solves
+    -- this only for horizontal movement, but not for vertical.
+    local can_go_overline = not is_linewise and direction == 'right'
+    local can_go_overbuf = is_linewise and direction == 'down'
+    local paste_key = (can_go_overline or can_go_overbuf) and 'p' or 'P'
+
+    -- Restore `curswant` to try moving cursor to initial column (just like
+    -- default `hjkl` moves)
+    if dir_type == 'vert' then H.set_curswant(H.move_state.curswant) end
+
+    -- Possibly reduce number of moves by one to not overshoot move
+    local n = count1 - ((paste_key == 'p' or is_edge_selection) and 1 or 0)
+
+    -- Don't allow movement past last line of block selection (any part)
+    if cur_mode == '\22' and direction == 'down' and vim.fn.line('$') == vim.fn.line("'>") then n = 0 end
+
+    -- Move cursor
+    if n > 0 then cmd(n .. H.move_keys[direction]) end
+
+    -- Save curswant
+    H.move_state.curswant = H.get_curswant()
+
+    -- Open just enough folds (but not in linewise mode, as it allows moving
+    -- folds altogether)
+    if not is_linewise then cmd('zv') end
+
+    -- Paste
+    cmd('"z' .. paste_key)
+
+    -- Select newly moved region. Another way is to use something like `gvhoho`
+    -- but it doesn't work well with selections spanning several lines.
+    cmd('`[1v')
+
+    -- Restore intermediate values
+    vim.fn.setreg('z', cache_z_reg)
+    vim.o.virtualedit = cache_virtualedit
+  end
+
+  -- Reindent linewise selection if `=` can do that
+  if is_linewise and dir_type == 'vert' and vim.o.equalprg == '' then cmd('=gv') end
+
+  -- Track new state to allow joining in single undo block
+  H.move_state = H.get_move_state()
+end
+
+H.move_keys = { left = 'h', down = 'j', up = 'k', right = 'l' }
+H.indent_keys = { left = '<', right = '>' }
+
+H.move_state = { buf_id = nil, changedtick = nil, curswant = nil }
+H.get_move_state = function()
+  return {
+    buf_id = vim.api.nvim_get_current_buf(),
+    changedtick = vim.b.changedtick,
+    curswant = H.move_state.curswant or H.get_curswant(),
+  }
+end
+
+-- This is needed for compatibility with Neovim<=0.6
+-- TODO: Remove after compatibility with Neovim<=0.6 is dropped
+H.getcursorcharpos = vim.fn.exists('*getcursorcharpos') == 1 and vim.fn.getcursorcharpos or vim.fn.getcurpos
+H.setcursorcharpos = vim.fn.exists('*setcursorcharpos') == 1 and vim.fn.setcursorcharpos or vim.fn.cursor
+
+H.get_curswant = function() return H.getcursorcharpos()[5] end
+H.set_curswant = function(x)
+  if x == nil then return end
+
+  local cursor_pos = H.getcursorcharpos()
+  cursor_pos[5] = x
+  -- `setcursorcharpos()` doesn't take buffer id as first element
+  table.remove(cursor_pos, 1)
+  H.setcursorcharpos(cursor_pos)
+end
+
 --- Print Lua objects in command line
 ---
 ---@param ... any Any number of objects to be printed each on separate line.

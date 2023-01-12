@@ -64,6 +64,31 @@ Parameters~
   width is computed. Default: 0 for current.
 
 ------------------------------------------------------------------------------
+                                                     *MiniMisc.move_selection()*
+                     `MiniMisc.move_selection`({direction})
+Move visually selected region in any direction within present lines
+
+Suggested setup: >
+  vim.keymap.set('x', 'H', [[<Cmd>lua MiniMisc.move_selection('left')<CR>]])
+  vim.keymap.set('x', 'J', [[<Cmd>lua MiniMisc.move_selection('down')<CR>]])
+  vim.keymap.set('x', 'K', [[<Cmd>lua MiniMisc.move_selection('up')<CR>]])
+  vim.keymap.set('x', 'L', [[<Cmd>lua MiniMisc.move_selection('right')<CR>]])
+
+Features:
+- Works in all Visual submodes (charwise |v|, linewise |V|, and blockwise
+  |CTRL-V|) in all four directions (left, down, up, right). Horizontal
+  linewise movement is equivalent to indent with |>| and dedent with |<|.
+- Respects `v:count`. Something like `4L` will move selection equivalently
+  to 4 times pressing `L`.
+- All consecutive moves (regardless of direction) can be undone by a single |u|.
+- Respects `curswant` (see |getcurpos()|). It will move selection as how
+  cursor is moving (not strictly vertically if target column is not present
+  in target line).
+
+Parameters~
+{direction} `(string)` One of "left", "down", "up", "right".
+
+------------------------------------------------------------------------------
                                                                 *MiniMisc.put()*
                              `MiniMisc.put`({...})
 Print Lua objects in command line
